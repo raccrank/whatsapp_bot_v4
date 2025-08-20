@@ -102,12 +102,13 @@ def webhook():
     user_session = sessions.get(from_number, {"state": "initial"})
 
     # Check for keywords that can be used at any time
+    # Keywords that should trigger live agent handoff
+    live_agent_keywords = ["agent", "human", "help", "support"]
     set_session(from_number, user_session)
     if any(keyword in incoming_msg for keyword in live_agent_keywords):
         notify_client_of_handoff(from_number, incoming_msg)
         user_session["state"] = "handoff"
-        # Keywords that should trigger live agent handoff
-        live_agent_keywords = ["agent", "human", "help", "support"]
+        
         sessions[from_number] = user_session
         pop_session(from_number)
         return str(response)
