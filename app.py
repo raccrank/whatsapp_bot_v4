@@ -14,8 +14,8 @@ app = Flask(__name__)
 # Your Twilio Account SID and Auth Token
 # These are loaded from environment variables for security.
 # You will need to set these on your server.
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_ACCOUNT_SID = os.environ.get("AC1b897ad074c944d2bae3ecb29b1d270a")
+TWILIO_AUTH_TOKEN = os.environ.get("51f91108f697aedba4a3a12c0d6b509e")
 # Fail-fast if required environment variables are missing
 if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
     raise RuntimeError("Missing Twilio credentials: Please set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN environment variables.")
