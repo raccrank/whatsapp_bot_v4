@@ -4,6 +4,8 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 import json
 import logging
+from dotenv import load_dotenv
+
 
 # Set up logging for better debugging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -14,6 +16,7 @@ app = Flask(__name__)
 # Your Twilio Account SID and Auth Token
 # These are loaded from environment variables for security.
 # You will need to set these on your server.
+load_dotenv("cred.env")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 # Fail-fast if required environment variables are missing
