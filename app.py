@@ -181,20 +181,7 @@ def webhook():
     
     sessions[from_number] = user_session
     return str(response)
-            user_session["state"] = "initial"
-            sessions.pop(from_number, None) # Remove the session to clean up memory
-        else:
-            response.message("Oops, that's not a valid option. Please reply with '1' to confirm, or 'start' to begin a new order.")
-            # Keep the user in the same state in case they make another mistake
-            user_session["state"] = "awaiting_confirmation"
-    
-    elif user_session["state"] == "handoff":
-        # Do nothing, a human agent is now handling this conversation
-        # You could send a passive "A human is still with you" message if needed
-        pass
-    
-    sessions[from_number] = user_session
-    return str(response)
+    # (This block is a duplicate and should be removed. The correct logic is already present above.)
 
 # --- Endpoint for your client to send a payment receipt ---
 @app.route("/send_receipt", methods=["POST"])
@@ -207,8 +194,10 @@ def send_receipt():
     don't need to know anything about Twilio.
     """
     data = request.json
-        if sessions.get(customer_number, {}).get("state") == "handoff":
-            sessions[customer_number] = {"state": "initial"}
+    customer_number = data.get("customer_number")
+    message_body = data.get("message_body")
+    if sessions.get(customer_number, {}).get("state") == "handoff":
+        sessions[customer_number] = {"state": "initial"}
         return {"status": "success", "message": "Receipt sent!"}, 200
     if not customer_number or not message_body:
         return {"error": "Missing customer_number or message_body"}, 400
