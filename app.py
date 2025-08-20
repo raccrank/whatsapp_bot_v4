@@ -94,6 +94,7 @@ def webhook():
     from Twilio. This is where the magic happens!
     """
     incoming_msg = request.values.get("Body", "").lower().strip()
+    from_number = request.values.get("From")
     user_session = get_session(from_number)
     response = MessagingResponse()
 
