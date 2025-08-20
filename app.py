@@ -39,7 +39,7 @@ POCHI_DETAILS = "Pochi la Biashara 0743706598"
 import redis
 
 # Connect to Redis (make sure Redis is running and accessible)
-redis_url = os.environ.get("redis-14789.c62.us-east-1-4.ec2.redns.redis-cloud.com", "redis://localhost:14789/0")
+redis_url = os.environ.get("REDIS_URL")
 redis_client = redis.StrictRedis.from_url(redis_url, decode_responses=True)
 
 def get_session(key):
