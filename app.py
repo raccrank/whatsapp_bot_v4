@@ -8,7 +8,6 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from dotenv import load_dotenv
 import redis
-import urllib.parse
 
 # -------- Configuration & Logging --------
 load_dotenv("cred.env")
@@ -51,6 +50,9 @@ def session_key(number):
 def orders_list_key():
     return "orders:recent"
 
+def seller_active_chat_key(seller_number):
+    return f"seller_active_chat:{seller_number}"
+
 # Session helpers (persistent)
 def get_session(key):
     session_data = redis_client.get(session_key(key))
@@ -61,6 +63,15 @@ def set_session(key, value):
 
 def pop_session(key):
     redis_client.delete(session_key(key))
+
+def get_seller_active_chat(seller_number):
+    return redis_client.get(seller_active_chat_key(seller_number))
+
+def set_seller_active_chat(seller_number, buyer_number):
+    redis_client.set(seller_active_chat_key(seller_number), buyer_number)
+
+def pop_seller_active_chat(seller_number):
+    redis_client.delete(seller_active_chat_key(seller_number))
 
 # Save order in Redis list (recent)
 def save_order(order):
@@ -109,13 +120,6 @@ def get_product_by_choice(choice: str):
             return p
     return None
 
-def create_whatsapp_link(phone_number, message):
-    """Generates a WhatsApp link for direct chat."""
-    # Ensure the phone number is in the correct format (e.g., +2547...)
-    # and the message is URL-encoded.
-    encoded_message = urllib.parse.quote(message)
-    return f"https://wa.me/{phone_number}?text={encoded_message}"
-
 # -------- Webhook (single endpoint for Twilio) --------
 @app.route("/whatsapp", methods=["POST"])
 def webhook():
@@ -155,30 +159,24 @@ def _handle_buyer_incoming(buyer_number, incoming_msg, resp: MessagingResponse):
     if any(k in msg_lower for k in BUYER_HANDOFF_KEYWORDS):
         logger.info("Buyer %s requests handoff to seller.", buyer_number)
         
-        # --- NEW HANDOFF LOGIC ---
-        # 1. Update session state for handoff
+        # Mark session for seller handoff
         session["state"] = "handoff_seller"
         session["linked_seller"] = SELLER_NUMBER
         set_session(buyer_number, session)
 
-        # 2. Prepare direct WhatsApp link for seller
-        handoff_message_for_seller = f"Hello, I am a new lead. My name is {buyer_number} and I'm interested in talking to you. Could you assist me?"
-        direct_link = create_whatsapp_link(buyer_number.replace('whatsapp:', ''), handoff_message_for_seller)
-
-        # 3. Build summary for seller and include the direct link
-        summary = (
-            f"🚨 New buyer handoff: {buyer_number}\n"
-            f"Last message: {incoming_msg}\n\n"
-            f"Session data:\n{json.dumps(session.get('data', {}), indent=2)}\n\n"
-            f"🔗 To chat with the buyer directly, click this link:\n{direct_link}\n\n"
-            "This will open a new chat with the buyer on your WhatsApp. The bot will no longer relay messages for this conversation."
-        )
-
-        # 4. Send the handoff message to the seller
-        client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=summary)
+        # Set this buyer as the seller's active conversation
+        set_seller_active_chat(SELLER_NUMBER, buyer_number)
         
-        # 5. Inform the buyer that the seller will contact them directly
-        resp.message("Connecting you to the seller now. Please wait, they will reach out to you directly on WhatsApp.")
+        # Build summary for seller
+        summary = (
+            f"🚨 New handoff request from {buyer_number}!\n"
+            f"Last message: {incoming_msg}\n\n"
+            "This is now your active conversation. Just reply to this chat to talk to the buyer.\n\n"
+            f"Session data:\n{json.dumps(session.get('data', {}), indent=2)}\n\n"
+            "To switch conversations, use the #switch command. Other commands: #bot (return buyer to bot), #end (close chat), #list, #help"
+        )
+        client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=summary)
+        resp.message("I've connected you with the seller. They will respond shortly.")
         return str(resp)
 
     # Normal bot states
@@ -241,38 +239,33 @@ def _handle_buyer_incoming(buyer_number, incoming_msg, resp: MessagingResponse):
         # Confirm to buyer and handoff to seller automatically for order follow up
         resp.message(
             f"✅ Order recorded:\n{order['product_name']} x {order['quantity']}\n"
-            f"Total: Ksh {order['total']}\nLocation: {order['location']}\n\nConnecting you to the seller for confirmation..."
+            f"Total: Ksh {order['total']}\nLocation: {order['location']}\n\nI've connected you with the seller, they will respond shortly to confirm your order details."
         )
         session["state"] = "handoff_seller"
         session["linked_seller"] = SELLER_NUMBER
         session["data"]["last_order_id"] = order["order_id"]
         set_session(buyer_number, session)
 
-        # Prepare and send the handoff message with the direct link
-        handoff_message_for_seller = (
-            f"Hi, I have a new order for you from {buyer_number}. "
-            f"Product: {order['product_name']} x {order['quantity']}, "
-            f"Total: Ksh {order['total']}, "
-            f"Location: {order['location']}. "
-            "Please click the link below to reply directly to the buyer."
-        )
-        direct_link = create_whatsapp_link(buyer_number.replace('whatsapp:', ''), handoff_message_for_seller)
-
+        # Set this buyer as the seller's active conversation
+        set_seller_active_chat(SELLER_NUMBER, buyer_number)
+        
+        # Notify seller with order summary
         summary = (
-            f"🆕 New order / handoff from {buyer_number}:\n"
+            f"🆕 New order / handoff from {buyer_number}!\n"
             f"• Product: {order['product_name']}\n"
             f"• Qty: {order['quantity']}\n"
             f"• Location: {order['location']}\n"
             f"• Total: Ksh {order['total']}\n\n"
-            f"🔗 To contact the buyer directly, click this link:\n{direct_link}\n\n"
-            "The bot will no longer relay messages for this conversation. You can also use seller commands like #bot, #end, #list, #switch <buyer>, #help, #supervisor."
+            "This is now your active conversation. Just reply to this chat to talk to the buyer.\n\n"
+            "Seller commands: #bot, #end, #list, #switch <buyer>, #help, #supervisor"
         )
         client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=summary)
         return str(resp)
 
     if state in ("handoff_seller", "handoff_supervisor"):
-        # The bot will now only send an acknowledgement, as the seller should be replying directly.
-        resp.message("The seller has been notified and will contact you directly on WhatsApp. Please check your personal WhatsApp for their message.")
+        # Relays buyer message to the bot's chat with the seller
+        client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=f"{buyer_number} says: {incoming_msg}")
+        resp.message("Message sent to seller.")
         return str(resp)
 
     # Fallback
@@ -304,36 +297,40 @@ def _handle_seller_incoming(incoming_msg, resp: MessagingResponse):
                 )
         resp.message("Supervisor notified. They’ll join shortly.")
         return str(resp)
-    
-    # All of the following commands are for the bot, as the seller's direct messages should not come back here.
-    # The seller should be replying to the buyer's number directly.
-    # The following commands remain relevant for managing the sessions on the bot's end.
 
-    # --- Option A: reply system ---
-    if lower.startswith("#reply"):
-        parts = msg.split()
-        if len(parts) < 3:
-            resp.message("Usage: #reply whatsapp:+2547... your message here")
-            return str(resp)
-        buyer = parts[1]
-        reply_text = " ".join(parts[2:])
-        s = get_session(buyer)
-        if s.get("state") not in ("handoff_seller", "handoff_supervisor"):
-            resp.message(f"{buyer} is not in active handoff.")
+    # --- Commands to manage active conversation ---
+    if lower == "#list":
+        buyers = list_handoff_buyers_for_seller(SELLER_NUMBER)
+        active_chat = get_seller_active_chat(SELLER_NUMBER)
+        if not buyers:
+            resp.message("No active buyers in handoff.")
             return str(resp)
         
-        # ---
-        # Note: This logic is for the bot to reply on behalf of the seller.
-        # It's now less relevant with the direct handoff approach, but is kept for bot-initiated replies.
-        # ---
-        client.messages.create(
-            from_=TWILIO_WHATSAPP_NUMBER,
-            to=buyer,
-            body=f"👨‍💼 Seller: {reply_text}"
-        )
-        resp.message(f"✅ Sent reply to {buyer}")
+        buyer_list = []
+        for b in buyers:
+            status = "(Active)" if b == active_chat else ""
+            buyer_list.append(f"{b} {status}")
+        
+        resp.message("Active buyers:\n" + "\n".join(buyer_list))
         return str(resp)
 
+    if lower.startswith("#switch"):
+        parts = msg.split()
+        if len(parts) != 2:
+            resp.message("Usage: #switch whatsapp:+...")
+            return str(resp)
+        buyer_to_switch = parts[1]
+        
+        # Validate that the buyer is in an active handoff
+        s = get_session(buyer_to_switch)
+        if not s or s.get("state") not in ("handoff_seller", "handoff_supervisor"):
+            resp.message(f"{buyer_to_switch} is not in active handoff.")
+            return str(resp)
+
+        set_seller_active_chat(SELLER_NUMBER, buyer_to_switch)
+        resp.message(f"Switched active chat to {buyer_to_switch}. Your next message will be sent to them.")
+        return str(resp)
+        
     if lower.startswith("#end"):
         parts = msg.split()
         if len(parts) != 2:
@@ -344,6 +341,7 @@ def _handle_seller_incoming(incoming_msg, resp: MessagingResponse):
         if not s or s.get("state") not in ("handoff_seller", "handoff_supervisor"):
             resp.message(f"{buyer} is not in active handoff.")
             return str(resp)
+        
         client.messages.create(
             from_=TWILIO_WHATSAPP_NUMBER,
             to=buyer,
@@ -352,24 +350,34 @@ def _handle_seller_incoming(incoming_msg, resp: MessagingResponse):
         s["state"] = "awaiting_product"
         s.pop("linked_seller", None)
         set_session(buyer, s)
+        # Clear the active chat if it was this one
+        if get_seller_active_chat(SELLER_NUMBER) == buyer:
+            pop_seller_active_chat(SELLER_NUMBER)
+
         resp.message(f"Closed chat with {buyer}.")
         return str(resp)
 
-    if lower == "#list":
-        buyers = list_handoff_buyers_for_seller(SELLER_NUMBER)
-        if not buyers:
-            resp.message("No active buyers in handoff.")
-            return str(resp)
-        resp.message("Active buyers:\n" + "\n".join(buyers))
-        return str(resp)
-
     if lower == "#help":
-        resp.message("Seller commands:\n#list\n#reply <buyer> <message>\n#end <buyer>\n#supervisor")
+        resp.message("Seller commands:\n#list\n#switch <buyer>\n#end <buyer>\n#supervisor")
         return str(resp)
 
-    # This fallback is now less likely to be used for handoff conversations,
-    # as the seller should be replying directly to the buyer's number.
-    resp.message("⚠️ Unknown command. Use #help to see options.")
+    # --- Automatic relay logic ---
+    # If the message is not a command, we assume it's a reply to the active chat.
+    active_chat = get_seller_active_chat(SELLER_NUMBER)
+    if not active_chat:
+        resp.message("No active buyer conversation found. Use #list to see active buyers and #switch to select one.")
+        return str(resp)
+    
+    # Check if the active chat is still in handoff state before relaying
+    s = get_session(active_chat)
+    if s.get("state") not in ("handoff_seller", "handoff_supervisor"):
+        resp.message(f"The chat with {active_chat} is no longer in handoff. Please use a command or select a new active chat.")
+        pop_seller_active_chat(SELLER_NUMBER) # Clear the invalid active chat
+        return str(resp)
+        
+    # Relay message to buyer
+    client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=active_chat, body=f"👨‍💼 Seller: {incoming_msg}")
+    resp.message(f"✅ Sent to {active_chat}.")
     return str(resp)
 
 # -------- Supervisor handling endpoint (you can also reply via Twilio number directly) --------
