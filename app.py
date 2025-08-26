@@ -8,6 +8,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from dotenv import load_dotenv
 import redis
+import urllib.parse
 
 # -------- Configuration & Logging --------
 load_dotenv("cred.env")
@@ -108,6 +109,13 @@ def get_product_by_choice(choice: str):
             return p
     return None
 
+def create_whatsapp_link(phone_number, message):
+    """Generates a WhatsApp link for direct chat."""
+    # Ensure the phone number is in the correct format (e.g., +2547...)
+    # and the message is URL-encoded.
+    encoded_message = urllib.parse.quote(message)
+    return f"https://wa.me/{phone_number}?text={encoded_message}"
+
 # -------- Webhook (single endpoint for Twilio) --------
 @app.route("/whatsapp", methods=["POST"])
 def webhook():
@@ -146,21 +154,31 @@ def _handle_buyer_incoming(buyer_number, incoming_msg, resp: MessagingResponse):
     # Buyer requests human/seller anytime
     if any(k in msg_lower for k in BUYER_HANDOFF_KEYWORDS):
         logger.info("Buyer %s requests handoff to seller.", buyer_number)
-        # mark session for seller handoff
+        
+        # --- NEW HANDOFF LOGIC ---
+        # 1. Update session state for handoff
         session["state"] = "handoff_seller"
         session["linked_seller"] = SELLER_NUMBER
         set_session(buyer_number, session)
 
-        # Build summary for seller
-        # include whatever data we have in session
+        # 2. Prepare direct WhatsApp link for seller
+        handoff_message_for_seller = f"Hello, I am a new lead. My name is {buyer_number} and I'm interested in talking to you. Could you assist me?"
+        direct_link = create_whatsapp_link(buyer_number.replace('whatsapp:', ''), handoff_message_for_seller)
+
+        # 3. Build summary for seller and include the direct link
         summary = (
             f"🚨 New buyer handoff: {buyer_number}\n"
             f"Last message: {incoming_msg}\n\n"
             f"Session data:\n{json.dumps(session.get('data', {}), indent=2)}\n\n"
-            "Reply to this message to talk to the buyer. Commands for seller: #bot (return buyer to bot), #end (close chat), #list, #switch <whatsapp:+...>, #help"
+            f"🔗 To chat with the buyer directly, click this link:\n{direct_link}\n\n"
+            "This will open a new chat with the buyer on your WhatsApp. The bot will no longer relay messages for this conversation."
         )
+
+        # 4. Send the handoff message to the seller
         client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=summary)
-        resp.message("Connecting you to the seller now. Please wait...")
+        
+        # 5. Inform the buyer that the seller will contact them directly
+        resp.message("Connecting you to the seller now. Please wait, they will reach out to you directly on WhatsApp.")
         return str(resp)
 
     # Normal bot states
@@ -230,34 +248,32 @@ def _handle_buyer_incoming(buyer_number, incoming_msg, resp: MessagingResponse):
         session["data"]["last_order_id"] = order["order_id"]
         set_session(buyer_number, session)
 
-        # Notify seller with order summary
+        # Prepare and send the handoff message with the direct link
+        handoff_message_for_seller = (
+            f"Hi, I have a new order for you from {buyer_number}. "
+            f"Product: {order['product_name']} x {order['quantity']}, "
+            f"Total: Ksh {order['total']}, "
+            f"Location: {order['location']}. "
+            "Please click the link below to reply directly to the buyer."
+        )
+        direct_link = create_whatsapp_link(buyer_number.replace('whatsapp:', ''), handoff_message_for_seller)
+
         summary = (
             f"🆕 New order / handoff from {buyer_number}:\n"
             f"• Product: {order['product_name']}\n"
             f"• Qty: {order['quantity']}\n"
             f"• Location: {order['location']}\n"
             f"• Total: Ksh {order['total']}\n\n"
-            "Reply here to chat with buyer. Seller commands: #bot, #end, #list, #switch <buyer>, #help, #supervisor"
+            f"🔗 To contact the buyer directly, click this link:\n{direct_link}\n\n"
+            "The bot will no longer relay messages for this conversation. You can also use seller commands like #bot, #end, #list, #switch <buyer>, #help, #supervisor."
         )
         client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=summary)
         return str(resp)
 
     if state in ("handoff_seller", "handoff_supervisor"):
-        # Relay buyer message to seller (if handoff_seller) OR to supervisor (if handoff_supervisor)
-        if state == "handoff_seller":
-            # send to the seller number
-            client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=f"{buyer_number} says: {incoming_msg}")
-            resp.message("Message sent to seller.")
-            return str(resp)
-        else:
-            # handoff_supervisor: forward to supervisor (you)
-            if SUPERVISOR_NUMBER:
-                client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SUPERVISOR_NUMBER, body=f"{buyer_number} says: {incoming_msg}")
-                resp.message("Message sent to supervisor.")
-                return str(resp)
-            else:
-                resp.message("Supervisor not configured.")
-                return str(resp)
+        # The bot will now only send an acknowledgement, as the seller should be replying directly.
+        resp.message("The seller has been notified and will contact you directly on WhatsApp. Please check your personal WhatsApp for their message.")
+        return str(resp)
 
     # Fallback
     resp.message("Type 'menu' to see products or 'help' to contact someone.")
@@ -288,6 +304,10 @@ def _handle_seller_incoming(incoming_msg, resp: MessagingResponse):
                 )
         resp.message("Supervisor notified. They’ll join shortly.")
         return str(resp)
+    
+    # All of the following commands are for the bot, as the seller's direct messages should not come back here.
+    # The seller should be replying to the buyer's number directly.
+    # The following commands remain relevant for managing the sessions on the bot's end.
 
     # --- Option A: reply system ---
     if lower.startswith("#reply"):
@@ -301,6 +321,11 @@ def _handle_seller_incoming(incoming_msg, resp: MessagingResponse):
         if s.get("state") not in ("handoff_seller", "handoff_supervisor"):
             resp.message(f"{buyer} is not in active handoff.")
             return str(resp)
+        
+        # ---
+        # Note: This logic is for the bot to reply on behalf of the seller.
+        # It's now less relevant with the direct handoff approach, but is kept for bot-initiated replies.
+        # ---
         client.messages.create(
             from_=TWILIO_WHATSAPP_NUMBER,
             to=buyer,
@@ -342,28 +367,12 @@ def _handle_seller_incoming(incoming_msg, resp: MessagingResponse):
         resp.message("Seller commands:\n#list\n#reply <buyer> <message>\n#end <buyer>\n#supervisor")
         return str(resp)
 
-    # Fallback: unrecognized seller command
+    # This fallback is now less likely to be used for handoff conversations,
+    # as the seller should be replying directly to the buyer's number.
     resp.message("⚠️ Unknown command. Use #help to see options.")
     return str(resp)
 
-
-    # Otherwise treat seller message as reply to buyer.
-    # Determine which buyer is the active one — pick the most recent in handoff (simple approach)
-    buyers = list_handoff_buyers_for_seller(SELLER_NUMBER)
-    if not buyers:
-        resp.message("No active buyers to send this message to. Use #list to see active buyers.")
-        return str(resp)
-
-    # Default: choose the first in list (leftmost)
-    target_buyer = buyers[0]
-    # Relay message to buyer
-    client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=target_buyer, body=f"Seller: {incoming_msg}")
-    resp.message(f"Sent to {target_buyer}.")
-    return str(resp)
-
 # -------- Supervisor handling endpoint (you can also reply via Twilio number directly) --------
-# Supervisor messages will come into the same /whatsapp endpoint if you use the same Twilio number.
-# The supervisor replies are treated as a seller reply for routing simplicity (since SUPERVISOR_NUMBER may be different).
 @app.route("/supervisor_reply", methods=["POST"])
 def supervisor_reply():
     """
