@@ -107,6 +107,8 @@ def webhook():
     # If message is from seller, handle seller actions
     if from_number == SELLER_NUMBER:
         return _handle_seller_incoming(from_number, incoming_msg)
+    elif from_number == SUPERVISOR_NUMBER:
+        return _handle_supervisor_incoming(from_number, incoming_msg)
 
     # Otherwise: buyer message
     return _handle_buyer_incoming(from_number, incoming_msg)
@@ -125,8 +127,10 @@ def seller_commands_text():
     return (
         "**Seller Commands:**\n"
         "• To close the chat: `#end`\n"
-        "• To return to the bot flow (not yet implemented): `#bot`\n"
-        "• To see available products (not yet implemented): `#list`\n"
+        "• To return to the bot flow: `#bot`\n"
+        "• To see available products: `#list`\n"
+        "• To escalate to a supervisor: `#escalate`\n"
+        "• To confirm payment and close chat: `#confirmed`\n"
     )
 
 def get_product_by_choice(choice: str):
@@ -172,10 +176,16 @@ def _handle_buyer_incoming(buyer_number, incoming_msg):
         return str(resp)
 
     # Handle a chat already in handoff
-    if session.get("state") in ("handoff_seller", "handoff_supervisor"):
+    if session.get("state") == "handoff_seller":
         # Relay buyer message to the bot's chat with the seller
-        client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=f"{buyer_number} says: {incoming_msg}")
+        client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=f"Buyer {buyer_number} says: {incoming_msg}")
         resp.message("Message sent to seller.")
+        return str(resp)
+    
+    if session.get("state") == "handoff_supervisor":
+        # Relay buyer message to the bot's chat with the supervisor
+        client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SUPERVISOR_NUMBER, body=f"Buyer {buyer_number} says: {incoming_msg}")
+        resp.message("Message sent to supervisor.")
         return str(resp)
 
     # The original bot conversation flow is now here
@@ -275,50 +285,157 @@ def _handle_seller_incoming(seller_number, incoming_msg):
     """Handles messages from the seller, including commands and seamless relay."""
     resp = MessagingResponse()
     msg_lower = incoming_msg.lower()
+    buyer_number = get_seller_active_chat(seller_number)
+
+    if not buyer_number:
+        resp.message("You do not have an active chat session with a buyer. You can respond to a handoff message to begin a session.")
+        # If no active chat, only process commands that don't need a buyer
+        if msg_lower in ["#list", "#help"]:
+            if msg_lower == "#list":
+                resp.message(product_menu_text())
+                return str(resp)
+            if msg_lower == "#help":
+                resp.message(seller_commands_text())
+                return str(resp)
+        return str(resp)
 
     # Commands for the seller to manage conversations
     if msg_lower == "#end":
-        buyer_number = get_seller_active_chat(seller_number)
-        if not buyer_number:
-            resp.message("No active chat to end.")
-            return str(resp)
-        
         # Notify buyer chat is closed
         client.messages.create(
             from_=TWILIO_WHATSAPP_NUMBER,
             to=buyer_number,
             body="✅ Chat closed by seller. You're back with the bot. Type 'menu' to continue."
         )
-        
         # Reset buyer session
         session = get_session(buyer_number)
         session["state"] = "initial"
         session.pop("linked_seller", None)
         set_session(buyer_number, session)
-        
         # Clear seller's active chat
         pop_seller_active_chat(seller_number)
-        
         resp.message(f"Closed chat with {buyer_number}.")
         return str(resp)
     
-    # Check for other commands if you decide to add them back in the future
-    # elif msg_lower == "#help":
-    #     resp.message("Seller commands: #end")
-    #     return str(resp)
+    elif msg_lower == "#bot":
+        # Hand back to bot
+        client.messages.create(
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=buyer_number,
+            body="You have been handed back to the bot's automated flow. Type 'menu' to continue."
+        )
+        # Reset buyer session
+        session = get_session(buyer_number)
+        session["state"] = "initial"
+        session.pop("linked_seller", None)
+        set_session(buyer_number, session)
+        # Clear seller's active chat
+        pop_seller_active_chat(seller_number)
+        resp.message(f"Handed back {buyer_number} to the bot.")
+        return str(resp)
+
+    elif msg_lower == "#list":
+        # Send product menu to buyer
+        client.messages.create(
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=buyer_number,
+            body=product_menu_text()
+        )
+        resp.message("The product menu was sent to the buyer.")
+        return str(resp)
+
+    elif msg_lower == "#confirmed":
+        session = get_session(buyer_number)
+        order = session.get("data", {})
+        if not order:
+            resp.message("No order data found to confirm. You might need to check your active chat or restart the conversation.")
+            return str(resp)
+
+        confirmation_message = (
+            f"🎉 Your payment has been received!\n\n"
+            f"Here is your order summary:\n"
+            f"• Product: {order.get('product_name')}\n"
+            f"• Quantity: {order.get('quantity')}\n"
+            f"• Total: Ksh {order.get('total')}\n"
+            f"• Location: {order.get('location')}\n\n"
+            f"Your order has been dispatched. Thank you for shopping with us! 😊"
+        )
+        client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=buyer_number, body=confirmation_message)
+
+        # Reset buyer session and end seller chat
+        session["state"] = "initial"
+        session.pop("linked_seller", None)
+        set_session(buyer_number, session)
+        pop_seller_active_chat(seller_number)
+        resp.message(f"Payment confirmed and chat with {buyer_number} closed.")
+        return str(resp)
+
+    elif msg_lower == "#escalate":
+        if not SUPERVISOR_NUMBER:
+            resp.message("Supervisor number is not configured.")
+            return str(resp)
+
+        # Update buyer's session for supervisor handoff
+        session = get_session(buyer_number)
+        session["state"] = "handoff_supervisor"
+        session.pop("linked_seller", None)
+        session["linked_supervisor"] = SUPERVISOR_NUMBER
+        set_session(buyer_number, session)
+        pop_seller_active_chat(seller_number)
+        
+        # Notify buyer
+        client.messages.create(
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=buyer_number,
+            body="Please wait a moment. I'm escalating your query to a supervisor. They will be with you shortly."
+        )
+
+        # Notify supervisor
+        history_summary = get_full_chat_history(buyer_number)
+        escalation_message = (
+            f"**Escalation Alert:** The seller needs your assistance with {buyer_number}.\n\n"
+            f"--- **Conversation History** ---\n"
+            f"{history_summary}\n"
+            "You are now connected to the buyer. Simply reply to this message to assist them."
+        )
+        client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SUPERVISOR_NUMBER, body=escalation_message)
+        
+        resp.message(f"Escalated chat with {buyer_number} to the supervisor.")
+        return str(resp)
 
     # Seamless relay logic: Assume any message that isn't a command is a reply
-    buyer_number = get_seller_active_chat(seller_number)
-    if not buyer_number:
-        resp.message("You do not have an active chat session with a buyer. You can respond to a handoff message to begin a session.")
+    store_message_history(buyer_number, f"Seller: {incoming_msg}")
+    client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=buyer_number, body=f"👨‍💼 Seller: {incoming_msg}")
+    resp.message("Your message was sent to the buyer.")
+    return str(resp)
+
+
+# --- Supervisor handling (seamless relay + commands) ---
+def _handle_supervisor_incoming(supervisor_number, incoming_msg):
+    """
+    Handles messages from the supervisor. For now, it simply relays them
+    back to the buyer who was escalated.
+    """
+    resp = MessagingResponse()
+    
+    # In a real app, you would have a more robust way to manage which buyer
+    # the supervisor is talking to, similar to the seller_active_chat key.
+    # For this implementation, we will assume a simple relay for now.
+    
+    # Find the buyer currently linked to this supervisor
+    active_buyer = None
+    for key in redis_client.scan_iter("session:*"):
+        session = get_session(key.split(":")[-1])
+        if session.get("linked_supervisor") == supervisor_number:
+            active_buyer = key.split(":")[-1]
+            break
+            
+    if not active_buyer:
+        resp.message("You do not have an active escalated chat.")
         return str(resp)
     
-    # Store seller's message in the chat history
-    store_message_history(buyer_number, f"Seller: {incoming_msg}")
-    
-    # Forward message directly to the buyer
-    client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=buyer_number, body=f"👨‍💼 Seller: {incoming_msg}")
-    
+    store_message_history(active_buyer, f"Supervisor: {incoming_msg}")
+    client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=active_buyer, body=f"🧑‍💻 Supervisor: {incoming_msg}")
     resp.message("Your message was sent to the buyer.")
     return str(resp)
 
