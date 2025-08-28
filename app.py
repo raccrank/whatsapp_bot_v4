@@ -120,6 +120,15 @@ def product_menu_text():
     s += "\nReply with the product number to order. Type 'help' to talk to a person."
     return s
 
+def seller_commands_text():
+    """Generates the text for seller commands."""
+    return (
+        "**Seller Commands:**\n"
+        "• To close the chat: `#end`\n"
+        "• To return to the bot flow (not yet implemented): `#bot`\n"
+        "• To see available products (not yet implemented): `#list`\n"
+    )
+
 def get_product_by_choice(choice: str):
     """Finds a product based on a user's input."""
     if choice.isdigit():
@@ -154,7 +163,8 @@ def _handle_buyer_incoming(buyer_number, incoming_msg):
             f"You are now connected to the buyer. Simply reply to this message "
             f"to respond directly to the customer.\n\n"
             f"--- **Conversation History** ---\n"
-            f"{history_summary}"
+            f"{history_summary}\n\n"
+            f"{seller_commands_text()}"
         )
         client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=message_for_seller)
         
@@ -178,6 +188,11 @@ def _handle_buyer_incoming(buyer_number, incoming_msg):
         return str(resp)
 
     if state == "awaiting_product":
+        # Check for commands to restart the flow
+        if msg_lower in ["menu", "start"]:
+            resp.message(product_menu_text())
+            return str(resp)
+        
         product = get_product_by_choice(incoming_msg)
         if not product:
             resp.message("I didn't catch that product. Reply with a product number or 'menu' to see the list.")
@@ -243,7 +258,8 @@ def _handle_buyer_incoming(buyer_number, incoming_msg):
             f"• Total: Ksh {order['total']}\n\n"
             f"--- **Conversation History** ---\n"
             f"{history_summary}\n\n"
-            "You are now connected to the buyer. Simply reply to this message to continue the conversation."
+            "You are now connected to the buyer. Simply reply to this message to continue the conversation.\n\n"
+            f"{seller_commands_text()}"
         )
         client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=SELLER_NUMBER, body=message_for_seller)
 
@@ -276,7 +292,7 @@ def _handle_seller_incoming(seller_number, incoming_msg):
         
         # Reset buyer session
         session = get_session(buyer_number)
-        session["state"] = "awaiting_product"
+        session["state"] = "initial"
         session.pop("linked_seller", None)
         set_session(buyer_number, session)
         
